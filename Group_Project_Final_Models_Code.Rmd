@@ -1,0 +1,687 @@
+---
+title: "MGT 6203- Group Project- Final (Team15)"
+author: "Project Members: \n\n ------------- \n\n Revathy Jagadeesan \n\n Jonathan
+  Feng \n\n Kaelme Wong \n\n Alec Arreche \n\n Sistata Bagale"
+date: "Date: 2024-04-06"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document:
+    df_print: paged
+---
+
+
+---
+
+
+This document contains all code for **Team 15's** for modeling in this project.
+
+---
+
+### Necessary Libraries
+
+Various libraries were used including basics from this course as well as additional for further data manipulation and modeling, here are the following libraries used below:
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+### Necessary Imports
+library(readr)
+library(dplyr)
+library(MASS)
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+library(caret)
+library(caTools)
+library(glmnet)
+library(lattice)
+library(randomForest)
+library(fastDummies)
+library(neuralnet)
+```
+
+
+---
+
+### Data: Acquisition of Clean Data
+
+Reading in data from our finalized data set after EDA (exploratory data analysis) phase of project. The path points directly to the "data" folder of this project directory. A couple other selects are made below on what was to be included or excluded from the clean data set for modeling purposes.
+
+```{r}
+# Reading in data from project data folder
+sephora <- read.csv("../../../data/sephora_clean_v2.csv")
+numeric_cols = c(
+  'rating',
+  'number_of_reviews',
+  'love',
+  'price',
+  'pure_num'
+)
+sephora <- sephora %>%
+  dplyr::select(
+    -c(
+      X,
+      id,
+      brand,
+      known_ingredients,
+      has_size,
+      unit,
+      log_price,
+      value_price
+    )
+  )
+factor_cols = setdiff(names(sephora), numeric_cols)
+sephora[,factor_cols] = lapply(sephora[,factor_cols], factor)
+sephora <-na.omit(sephora)
+head(sephora)
+```
+
+---
+
+### Splitting Data: Train & Test
+
+We decided to go with a 80-20 split, using a consistent seed of 15.
+
+```{r}
+set.seed(15)
+sample <- sample.split(sephora$price, SplitRatio = 0.8)
+train  <- subset(sephora, sample == TRUE)
+test   <- subset(sephora, sample == FALSE)
+# Let's check out size
+dim(train)
+```
+
+---
+
+### Models
+
+Below are the combinations of models we have tried. The order is as listed:
+
+1. Linear Regression - Normal Price
+2. Linear Regression - Log Price
+3. Step wise Regression - Log Price + forwards & backwards
+4. Step wise Regression - Log Price + forwards & backwards + evaluation on VIF
+5. LASSO Regression - Price
+6. LASSO Regression - Log Price
+7. Random Forest - Log Price
+8. Random Forest Tuned - Log Price
+9. Random Forest - Normal Price + feature selected variables from Model 4
+10. Neural Network - Log - Price
+
+**Explanations will be strictly included in the final paper portion of this project**
+
+First few models are accompanied with their respective plots as well as outputted results from
+either summary functions or pred_results() helper function metrics.
+
+
+---
+
+#### Test Results Function
+
+This function handles giving calculated results of mae, mse, rmse, and r2. This applies for the first
+few models utilizing the produced model and test data.
+
+```{r}
+
+pred_results <- function(model,x_test,y_test, output = TRUE, log = FALSE) {
+  
+  if (log == TRUE){
+    pred <- exp(predict(model, x_test))
+  } else {
+    pred <- predict(model, x_test)
+  }
+  mae <- mean(abs(pred - y_test))
+  mse <- mean((pred - y_test)^2)
+  rmse <- sqrt(mse)
+  r2_test <- 1 - (sum((y_test - pred)^2) / sum((y_test - mean(y_test))^2))
+  # Calculate adjusted R-squared
+  n <- length(y_test)  # Number of observations
+  p <- ncol(x_test) + 1  # Number of predictors (including intercept)
+  adjusted_r2_test <- 1 - ((1 - r2_test) * ((n - 1) / (n - p - 1)))
+  
+  if (output == TRUE) {
+    print(paste("Mean Absolute Error:", mae))
+    print(paste("Mean Squared Error:", mse))
+    print(paste("Root Mean Squared Error:", rmse))
+    print(paste("R-squared on Test Data:", r2_test))
+    print(paste("Adjusted R-squared on Test Data:", adjusted_r2_test))
+  }
+  
+  calcs = list(mae = mae, mse = mse, rmse = rmse, r2_test = r2_test,adjusted_r2_test = adjusted_r2_test)
+  
+  return(calcs)
+}
+```
+
+
+---
+
+#### 1. Linear Regression - Normal Price
+
+Our baseline linear model to reference against later.
+
+```{r}
+set.seed(15)
+## OLS Regression with lm() 
+full_model_linear = lm(price ~ ., data=train)
+summary(full_model_linear)
+# Plotting and printing results
+plot(full_model_linear)
+ln_ln_results <- pred_results(full_model_linear, test, test$price, output = TRUE, log = FALSE)
+
+```
+
+---
+
+#### 2. Linear Regression - Log Price
+
+Baseline log-linear for reference later.
+
+```{r}
+set.seed(15)
+## OLS Regression - log price with lm()
+log_linear = lm(log(price) ~ ., data=train)
+summary(log_linear)
+# Plotting and printing results
+plot(log_linear)
+ln_log_results <- pred_results(log_linear, test, test$price, output = TRUE, log = TRUE)
+```
+
+---
+
+#### 3. Step wise Regression - Log Price + forwards & backwards
+
+Features both forwards/backwards selection steps and their feature importance plots. We ended up going with the backwards selection model due to performance to include in our final models comparison table. 
+
+```{r}
+set.seed(15)
+# Stepwise Regression
+# Base and full models
+base_model = lm(log(price) ~ 1, data=sephora)
+full_model = lm(log(price) ~ ., data=sephora)
+# Forwards Selection
+forward = step(base_model, direction='forward', scope=formula(full_model), trace=0)
+summary(forward)
+# Forwards Results
+pred_results(forward, test, test$price,output = TRUE, log = TRUE)
+# Forwards plotting of importance
+forward_coef <- coef(forward)[-1]
+barplot(forward_coef, names.arg = names(forward_coef), horiz = TRUE, las = 1, main = "Coefficients")
+# Backwards Selection
+backward = step(full_model, direction='backward', scope=formula(full_model), trace=0)
+summary(backward)
+# Backwards Results
+step_bw_results <- pred_results(backward, test, test$price,output = TRUE, log = TRUE)
+# Forwards plotting of importance
+backward_coef <- coef(backward)[-1]
+barplot(backward_coef, names.arg = names(backward_coef), horiz = TRUE, las = 1, main = "Coefficients")
+```
+
+
+---
+
+#### 4. Step wise Regression - Normal Price + forwards & backwards + evaluation on VIF
+
+Another approach with step wise regression utilizing both forwards and backwards with evaluation criteria based on VIF. Importance plots given and features on log-linear and linear-linear variants. We decided to go with the log-linear VIF variant due to consistency and performance evaluation.
+
+```{r}
+# Normal Price VIF Stewpise
+# Setting consistent seed
+set.seed(15)
+# Setting a baseline
+baseline_model <- lm(price ~., data=train)
+vif_values <- car::vif(baseline_model)
+# Performing step wise selection and storing selected variables for usage in model 8 RF
+stepwise_model <- step(baseline_model, direction="both", trace=0)
+selected_step <- as.list(attr(stepwise_model$terms, "term.labels"))
+selected_step <- as.character(selected_step)
+# Print summary
+summary(stepwise_model)
+# Evaluation on testing
+step_preds <- predict(stepwise_model, newdata=test)
+step_acc <- sqrt(mean((test$price - step_preds)^2))
+# Plotting Values of importance
+vif_coef <- coef(stepwise_model)[-1]
+barplot(vif_coef, names.arg = names(vif_coef), horiz = TRUE, las = 1, main = "Coefficients")
+# Print Results
+lin_stepwise_vif_metrics <- pred_results(stepwise_model, test, test$price, output = TRUE, log = FALSE)
+```
+
+```{r}
+# Log Price VIF Stepwise
+# Setting consistent seed
+set.seed(15)
+# Setting a baseline
+baseline_model_vif_log <- lm(log(price) ~., data=train)
+step_log_vif_values <- car::vif(baseline_model_vif_log)
+# Performing step wise selection and storing selected variables for usage in model 8 RF
+stepwise_log_vif_model <- step(baseline_model_vif_log, direction="both", trace=0)
+selected_step_log_vif <- as.list(attr(stepwise_log_vif_model$terms, "term.labels"))
+selected_step_log_vif <- as.character(selected_step_log_vif)
+# Print summary
+summary(stepwise_log_vif_model)
+# Evaluation on testing
+#step_preds_log_Vif <- predict(stepwise_log_vif_model, newdata=test)
+#step_acc_log_vif <- sqrt(mean((log(test$price) - step_preds)^2))
+# Plotting Values of importance
+log_vif_coef <- coef(stepwise_log_vif_model)[-1]
+barplot(log_vif_coef, names.arg = names(log_vif_coef), horiz = TRUE, las = 1, main = "Coefficients")
+# Print Results
+log_stepwise_vif_metrics <- pred_results(stepwise_log_vif_model, test, test$price, output = TRUE, log = TRUE)
+```
+
+
+---
+
+#### 5. LASSO Regression - Price
+
+Lasso regression exploration based on both log and linear prices with feature importance plot included. We ended up selecting log lasso due to consistency and performance.
+
+```{r}
+set.seed(15)
+# Linear Lasso
+# Defining variables of y_train, y_test
+y_train <- train$price
+y_test <- test$price
+
+# Defining matrix of predictor variables
+x_train <-  model.matrix(~ . - 1, data = train[, -which(names(train) %in% c("price"))])
+x_test <-  model.matrix(~ . - 1, data = test[, -which(names(test) %in% c("price"))])
+
+# Fitting LASSO regression
+# Fit Lasso Regression model
+lasso_model <- cv.glmnet(x_train, y_train, alpha = 1, standardize = TRUE)
+
+# Plot cross-validated mean squared error
+plot(lasso_model)
+
+# Choose best lambda value based on cross-validation
+best_lambda <- lasso_model$lambda.min
+best_lambda
+
+# Refit the model with the chosen lambda
+lasso_model_final <- glmnet(x_train, y_train, alpha = 1, lambda = best_lambda, standardize = TRUE)
+
+# Predict on test set
+lasso_pred <- predict(lasso_model_final, newx = x_test)
+
+# Evaluate model
+lasso_metrics <- pred_results(lasso_model_final,x_test, y_test, output = TRUE, log = FALSE)
+summary(lasso_model_final)
+```
+```{r}
+# Get the coefficients from the LASSO model
+lasso_coefficients <- coef(lasso_model_final)
+
+# Extract coefficients with non-zero values
+non_zero_coefficients <- lasso_coefficients[-1, ] # Exclude intercept term
+
+# Filter out coefficients with non-zero values
+non_zero_coefficients <- non_zero_coefficients[non_zero_coefficients != 0 ]
+
+# Print the coefficients with non-zero values
+print(non_zero_coefficients)
+
+# Create a data frame with non-zero coefficients
+coefficients_df <- data.frame(Feature = names(non_zero_coefficients), Coefficient = non_zero_coefficients)
+
+# Print the data frame
+print(coefficients_df)
+
+
+```
+```{r}
+names(non_zero_coefficients)
+```
+
+#### 6. LASSO Regression - Log Price
+
+```{r}
+set.seed(15)
+# Log Lasso
+# Fit Lasso Regression model
+log_lasso_model <- cv.glmnet(x_train, log(train$price), alpha = 1, standardize = TRUE)
+
+# Plot cross-validated mean squared error
+plot(log_lasso_model)
+
+# Choose best lambda value based on cross-validation
+best_lambda_log <- log_lasso_model$lambda.min
+best_lambda_log
+
+# Refit the model with the chosen lambda
+log_lasso_model_final <- glmnet(x_train, log(train$price), alpha = 1, lambda = best_lambda_log, standardize = TRUE)
+summary(log_lasso_model_final)
+
+# Predict on test set
+lasso_prediction <- predict(log_lasso_model_final, newx = x_test)
+
+# Evaluate model
+log_lasso_metrics <- pred_results(log_lasso_model_final,x_test, test$price, output = TRUE, log = TRUE)
+lasso_coef <- coef(log_lasso_model_final)
+
+# Select non-zero coefficients
+non_zero_coeffs <- lasso_coef[lasso_coef != 0]
+
+# Get names of variables with nonzero coefficients
+nonzero_variables_log <- names(which(lasso_coef[-1, ] != 0))
+length(nonzero_variables_log)
+```
+```{r}
+# Get the coefficients from the LASSO model
+lasso_coefficients <- coef(log_lasso_model_final)
+
+# Extract coefficients with non-zero values
+non_zero_coefficients <- lasso_coefficients[-1, ] # Exclude intercept term
+
+# Filter out coefficients with non-zero values
+non_zero_coefficients <- non_zero_coefficients[non_zero_coefficients != 0 ]
+
+# Print the coefficients with non-zero values
+print(non_zero_coefficients)
+
+# Create a data frame with non-zero coefficients
+coefficients_df <- data.frame(Feature = names(non_zero_coefficients), Coefficient = non_zero_coefficients)
+
+# Print the data frame
+print(coefficients_df)
+
+```
+```{r}
+names(non_zero_coefficients)
+```
+
+
+---
+
+#### 7. Random Forest - Log Price
+
+Exploration of random forest on log price, below is the base model for benchmarking purposes.
+
+```{r}
+# Making sure correct libraries are called and setting seed
+library(randomForest)
+library(caret)
+set.seed(15)
+# Basic random forest model on log price
+rf  <- randomForest(log(price) ~., data=train,importance=TRUE)
+```
+
+
+```{r}
+# Plotting Importances
+varImpPlot(rf,cex=0.6)
+```
+```{r}
+varImpPlot(rf,cex=0.6,n.var=10)
+```
+
+
+```{r}
+# Physical plot of random forest error and trees count
+plot(rf)
+```
+
+
+```{r}
+# shows the optimal number of trees that minimizes the MSE
+which.min(rf$mse)
+```
+```{r}
+# Calculations and metrics output using pred_results
+rf_calcs <- pred_results(rf, test, test$price, output = TRUE, log = TRUE)
+```
+
+
+---
+
+#### 8. Random Forest Tuned - Log Price
+
+Explores tuned parameters for random forest. The original tuning is commented out as we discovered that there was minimal loss on returns with the final version of tuning. You can see the settings in the hyper_grid. Unfortunately, this will take some time to run and varies depending on your PC specs. The best best settings are selected for the final rf_tuned model and is tabled at the bottom.
+
+```{r}
+# Note: Please be patient this takes time to run :)
+# Loading libraries and setting seed
+library(ranger)
+set.seed(15)
+# Original tuning
+#hyper_grid <- expand.grid(    ntree = seq(300, 900, by = 100),    mtry = seq(1, 36, by = 1),    node_size = seq(1, 12, by = 2),    OOB_RMSE=0)
+# Final tuning
+# We have narrowed down our results to make this step run faster, with minimal loss on returns
+hyper_grid <- expand.grid(
+    ntree = seq(700, 900, by = 100),
+    mtry = seq(15, 20, by = 1),
+    node_size = seq(1, 8, by = 2),
+    OOB_RMSE=0
+)
+#hyper_grid = expand.grid(mtry=seq(1,36,by=1), node_size=seq(1,12, by=2),OOB_RMSE=0)
+for(i in 1:nrow(hyper_grid)){
+  
+model = ranger(formula=log(price) ~., data=train,num.trees = hyper_grid$ntree[i],mtry=hyper_grid$mtry[i], min.node.size = hyper_grid$node_size[i],seed=15)
+hyper_grid$OOB_RMSE[i]=sqrt(model$prediction.error)
+}
+# Tabling Results
+hyper_grid %>%
+  dplyr::arrange(OOB_RMSE) %>%
+  head(10)
+```
+
+
+```{r}
+# Calculations using tuned random forest results and calculations with pred_results
+# Note: This may take a while as well.
+set.seed(15)
+rf_tuned  <- randomForest(log(price) ~., data=train,importance=TRUE,ntree=800 ,mtry=19, nodesize=1)
+rf_tuned_calcs <- pred_results(rf_tuned, test, test$price, output = TRUE, log = TRUE)
+```
+```{r}
+# Plotting Importances
+varImpPlot(rf_tuned,cex=0.6)
+```
+```{r}
+varImpPlot(rf_tuned,cex=0.6,n.var=10)
+```
+
+
+---
+
+#### 9. Random Forest - Normal Price + feature selected variables from Model 4
+
+Explores the linear variant of the random forest model for baseline and feature selected variables based on step 4. Each tabled entry corresponds with the features set used as well as the amount of n_estimators used. The final selection of this model is based on the best performing settings.
+
+```{r}
+# Function to perform Random Forest
+all_rf <- function(train_data, test_data, predictors, n_estimators) {
+  
+  set.seed(15)
+  
+  # Split into x, y variables
+  X_train <- train_data[, predictors]
+  y_train <- train_data$price
+  X_test <- test_data[, predictors]
+  y_test <- test_data$price
+  
+  # Perform Random Forest
+  rf_mod <- randomForest(x = X_train, y = y_train, ntree = n_estimators)
+  y_pred <- predict(rf_mod, X_test)
+  
+  # Metrics calculation
+  mse <- mean((y_test - y_pred)^2)
+  rmse <- sqrt(mse)
+  r2 <- cor(y_pred, y_test)^2
+  
+  n <- dim(X_test)[1]
+  p <- dim(X_test)[2]
+  adj_r2 <- 1 - (1 - r2) * ((n - 1) / (n - p - 1))
+  
+  return(list(r2 = r2, adj_r2 = adj_r2, mse = mse, rmse = rmse))
+}
+# Random Forest with each type of feature selection
+n_estimators_list <- c(50, 100, 150, 200)
+rf_features <- as.list(colnames(train))
+rf_features <- as.character(rf_features[rf_features != "price"])
+feature_dict <- list(vif = selected_step, base = rf_features)
+rf_result_df <- data.frame(fs_method = character() , n_estimators = numeric(), r2 = numeric(), r2_adj = numeric(), mse = numeric(), rmse = numeric(), feature_count = numeric())
+for (n in n_estimators_list) {
+  temp_row <- list()
+  
+  for(m in names(feature_dict)) {
+    cat("Running Features Set: ", m, " on n_estimators: ", n, "\n")
+    
+    result <- all_rf(train, test, feature_dict[[m]], n)
+    temp_row$fs_method <- m
+    temp_row$n_estimators <- n
+    temp_row$r2 <- result$r2
+    temp_row$r2_adj <- result$adj_r2
+    temp_row$mse <- result$mse
+    temp_row$rmse <- result$rmse
+    temp_row$feature_count <- length(feature_dict[[m]])
+  
+    names(temp_row) <- names(rf_result_df)
+    rf_result_df <- rbind(rf_result_df, temp_row)
+    
+  }
+}
+# Print result
+print(rf_result_df)
+```
+
+
+```{r}
+# Sorted table on r2 and r2_adj
+sorted_rf_result_df <- rf_result_df[order(-rf_result_df$r2, -rf_result_df$r2_adj), ]
+print(sorted_rf_result_df)
+```
+
+```{r}
+# getting best model results
+best_vif_rf <- randomForest(price ~., data=train, ntree=50)
+rf_vif_calcs <-pred_results(best_vif_rf, test, test$price, output = TRUE, log = FALSE)
+best_log_vif_rf <- randomForest(log(price) ~., data=train, ntree=50)
+rf_log_vif_calcs <- pred_results(best_log_vif_rf, test, test$price, output = TRUE, log = TRUE)
+```
+
+
+---
+
+#### 10. Neural Network - Log - Price
+
+```{r}
+# Certain selected features using log model
+log_lr <- lm(log(price) ~., data = train)
+log_sum <- summary(log_lr)
+log_vars <- log_sum$coefficients[row.names(log_sum$coefficients) != "(Intercept)" ,4]
+p <- 0.01 
+log_sig_vars <- names(log_vars[log_vars <= p])
+# Selecting the categories
+k_var <- log_sig_vars[9:17]
+k_var <- gsub("1", "", k_var)
+k_var <- c(k_var, "category")
+k_var
+# Storage of kept variables
+keep_vars <- c(k_var, "limited_time_offer", "price")
+# Selecting data based off kept variables
+sephora_k <- read.csv("../../../data/sephora_clean_v2.csv")
+sephora_k <- sephora_k %>% dplyr::select(keep_vars)
+nums <- c("price", "pure_num")
+factor_cols = setdiff(names(sephora_k), nums)
+sephora_k[,factor_cols] = lapply(sephora_k[,factor_cols], factor)
+sephora_k <-na.omit(sephora_k)
+# Splitting into train/test
+set.seed(15)
+sample <- sample.split(sephora_k$price, SplitRatio = 0.8)
+train_k  <- subset(sephora_k, sample == TRUE)
+test_k   <- subset(sephora_k, sample == FALSE)
+dim(train_k)
+dim(test_k)
+```
+
+
+```{r}
+# Helper function for neural network preparation
+nn_prep <- function(df,na_omit = TRUE, categorize = TRUE){
+  
+  if ("MarketingFlags" %in% colnames(df)){
+    df$MarketingFlags <- ifelse(df$MarketingFlags == "True", 1,0)
+  }
+  
+  if (categorize){
+    df <- df %>% dummy_cols( select_columns = c('category'), remove_first_dummy = TRUE) %>%
+      dplyr::select(!('category')) 
+  }
+  
+  df$price <- log(df$price)
+  factors <- sapply(df, is.factor)
+  df[ , factors] <- as.data.frame(apply(df[ , factors], 2, as.numeric))
+  
+  if (na_omit){
+    df <- na.omit(df)
+  }
+  
+  return(df)
+}
+# Storage to respective variables for the next step
+train_nn <- nn_prep(train_k)
+test_nn <- nn_prep(test_k)
+```
+
+
+```{r}
+# Setting seed
+set.seed(15)
+# Application of neuralnet model
+nn <- neuralnet(price ~ ., data = train_nn, hidden =1, stepmax=1e6, linear.output = TRUE)
+# Results calculation from pred_results
+n_calcs <- pred_results(nn, test_nn, exp(test_nn$price), output = TRUE, log = TRUE)
+```
+
+
+```{r}
+# Plotting neural network results
+plot(nn, rep = "best")
+```
+
+---
+
+### Tabling of Results
+
+Final tabling of all selected models above for each step. Each table will include the model_id (step), model_name, price_variant (whether it was log/linear price), mae, mse, rmse, and r2 score. These are only ordered by model_id descending to follow the steps we took in order. The last two are a split of this resulting data frame on linear and log price for convenience in final evaluation.
+
+```{r}
+#getting output results from above
+tabling_results_list <- list(ln_ln_results, ln_log_results, step_bw_results, lin_stepwise_vif_metrics, lasso_metrics,log_lasso_metrics, rf_calcs, rf_tuned_calcs, rf_vif_calcs, n_calcs)
+table_result_df <- do.call(rbind, lapply(tabling_results_list, function(x) as.data.frame(t(unlist(x)))))
+table_result_df$model_id <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+table_result_df$model_name <- c("Linear Regression", "Linear Regression", "Step Wise", "Stewp Wise VIF", "LASSO","LASSO", "Random Forest", "Random Forest Tuned", "Random Forest Normal", "Neural Network")
+table_result_df$price_variant <- c("linear", "log", "log", "linear", "linear", "log" ,"log", "log", "linear", "log")
+cols_order <- c("model_id", "model_name", "price_variant", "mae", "mse", "rmse", "r2_test","adjusted_r2_test")
+table_result_df <- table_result_df[, cols_order]
+table_result_df
+```
+
+```{r}
+# Linear Price Results Only
+lin_result_view <- table_result_df[table_result_df$price_variant == "linear", ]
+lin_result_view
+```
+
+
+```{r}
+# Linear Price Results Only
+log_result_view <- table_result_df[table_result_df$price_variant == "log", ]
+log_result_view
+```
+
+
+---
+FooterGeorgia Institute of Technology
+Georgia Institute of Technology avatar
+Georgia Institute of Technology
+© 2024 GitHub, Inc.
+Footer navigation
+Help
+Support
